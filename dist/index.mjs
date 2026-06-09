@@ -4286,6 +4286,11 @@ const DEFAULTS = {
 	debug: false,
 	fail_on_error: false
 };
+/**
+* Shape of the parts of `~/.claude.json` we read. Claude Code stores the
+* logged-in account (including the email) under `oauthAccount`.
+*/
+const ClaudeAccountSchema = object({ oauthAccount: object({ emailAddress: string().optional() }).passthrough().optional() }).passthrough();
 function parseBoolean(value) {
 	if (typeof value === "boolean") return value;
 	if (typeof value !== "string") return void 0;
@@ -4377,6 +4382,20 @@ function readEnvConfig(env) {
 		fail_on_error: parseBoolean(opt("CC_LANGFUSE_FAIL_ON_ERROR", env))
 	}));
 }
+/**
+* Read the logged-in Claude Code user's email from `~/.claude.json`, used as a
+* `user_id` fallback when one isn't explicitly configured. Returns undefined if
+* the file is missing/unreadable or has no account email.
+*/
+async function readClaudeUserEmail(claudeJsonFile) {
+	try {
+		const raw = JSON.parse(await fs.readFile(claudeJsonFile, "utf-8"));
+		const email$1 = ClaudeAccountSchema.parse(raw).oauthAccount?.emailAddress?.trim();
+		return email$1 && email$1.length > 0 ? email$1 : void 0;
+	} catch {
+		return;
+	}
+}
 const getHomeDir = () => process.env.HOME ?? os$2.homedir();
 async function getConfig(options) {
 	const home = options?.home ?? getHomeDir();
@@ -4384,8 +4403,10 @@ async function getConfig(options) {
 	const env = options?.env ?? process.env;
 	const [globalConfig$1, localConfig] = await Promise.all([readConfigFile(path.join(home, ".claude", "langfuse.json")), readConfigFile(path.join(cwd, ".claude", "langfuse.json"))]);
 	const envConfig = readEnvConfig(env);
+	const claudeUserId = globalConfig$1?.user_id ?? localConfig?.user_id ?? envConfig.user_id ? void 0 : await readClaudeUserEmail(path.join(home, ".claude.json"));
 	return ConfigSchema.parse({
 		...DEFAULTS,
+		...claudeUserId ? { user_id: claudeUserId } : {},
 		...globalConfig$1,
 		...localConfig,
 		...envConfig

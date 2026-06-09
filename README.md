@@ -72,7 +72,7 @@ Configuration is resolved as **defaults → `~/.claude/langfuse.json` → `<cwd>
 | `LANGFUSE_SECRET_KEY` / `CC_LANGFUSE_SECRET_KEY`           | Yes      | —                               | Langfuse secret key (`sk-lf-...`)                         |
 | `LANGFUSE_BASE_URL` / `CC_LANGFUSE_BASE_URL`               | No       | `https://us.cloud.langfuse.com` | Langfuse host / data region                               |
 | `LANGFUSE_TRACING_ENVIRONMENT` / `CC_LANGFUSE_ENVIRONMENT` | No       | —                               | Environment label for the traces (e.g. `production`)      |
-| `CC_LANGFUSE_USER_ID`                                      | No       | —                               | Attach a user id to all traces                            |
+| `CC_LANGFUSE_USER_ID`                                      | No       | Claude Code account email       | Attach a user id to all traces                            |
 | `CC_LANGFUSE_TAGS`                                         | No       | —                               | Extra tags for all traces (JSON array or comma-separated) |
 | `CC_LANGFUSE_METADATA`                                     | No       | —                               | JSON object of metadata to attach to all traces           |
 | `CC_LANGFUSE_MAX_CHARS`                                    | No       | `20000`                         | Truncate inputs/outputs longer than this many characters  |

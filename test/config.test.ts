@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getConfig } from "../src/config.js";
 
@@ -52,5 +56,36 @@ describe("getConfig", () => {
     expect(config.debug).toBe(true);
     expect(config.max_chars).toBe(500);
     expect(config.tags).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("getConfig — Claude Code user email fallback", () => {
+  let home: string;
+
+  beforeAll(async () => {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), "cc-langfuse-test-"));
+    await fs.writeFile(
+      path.join(home, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: "dev@example.com" } }),
+      "utf-8",
+    );
+  });
+
+  afterAll(async () => {
+    await fs.rm(home, { recursive: true, force: true });
+  });
+
+  it("uses the account email as user_id when none is configured", async () => {
+    const config = await getConfig({ home, cwd: NONEXISTENT, env: {} });
+    expect(config.user_id).toBe("dev@example.com");
+  });
+
+  it("lets an explicit user_id override the account email", async () => {
+    const config = await getConfig({
+      home,
+      cwd: NONEXISTENT,
+      env: { CC_LANGFUSE_USER_ID: "explicit-user" },
+    });
+    expect(config.user_id).toBe("explicit-user");
   });
 });

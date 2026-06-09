@@ -50,6 +50,16 @@ const DEFAULTS: Pick<Config, "base_url" | "max_chars" | "debug" | "fail_on_error
   fail_on_error: false,
 };
 
+/**
+ * Shape of the parts of `~/.claude.json` we read. Claude Code stores the
+ * logged-in account (including the email) under `oauthAccount`.
+ */
+const ClaudeAccountSchema = z
+  .object({
+    oauthAccount: z.object({ emailAddress: z.string().optional() }).passthrough().optional(),
+  })
+  .passthrough();
+
 function parseBoolean(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
   if (typeof value !== "string") return undefined;
@@ -157,6 +167,21 @@ function readEnvConfig(env: Record<string, string | undefined>): Partial<Config>
   );
 }
 
+/**
+ * Read the logged-in Claude Code user's email from `~/.claude.json`, used as a
+ * `user_id` fallback when one isn't explicitly configured. Returns undefined if
+ * the file is missing/unreadable or has no account email.
+ */
+async function readClaudeUserEmail(claudeJsonFile: string): Promise<string | undefined> {
+  try {
+    const raw = JSON.parse(await fs.readFile(claudeJsonFile, "utf-8")) as unknown;
+    const email = ClaudeAccountSchema.parse(raw).oauthAccount?.emailAddress?.trim();
+    return email && email.length > 0 ? email : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const getHomeDir = () => process.env.HOME ?? os.homedir();
 
 export async function getConfig(options?: {
@@ -174,8 +199,16 @@ export async function getConfig(options?: {
   ]);
   const envConfig = readEnvConfig(env);
 
+  // Fall back to the logged-in Claude Code account email as user_id, but only
+  // when no explicit user_id was provided via config files or environment.
+  const explicitUserId = globalConfig?.user_id ?? localConfig?.user_id ?? envConfig.user_id;
+  const claudeUserId = explicitUserId
+    ? undefined
+    : await readClaudeUserEmail(path.join(home, ".claude.json"));
+
   return ConfigSchema.parse({
     ...DEFAULTS,
+    ...(claudeUserId ? { user_id: claudeUserId } : {}),
     ...globalConfig,
     ...localConfig,
     ...envConfig,
