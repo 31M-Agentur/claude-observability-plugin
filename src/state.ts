@@ -3,6 +3,26 @@ import * as fs from "node:fs/promises";
 import type { TranscriptRow } from "./types.js";
 import { debugLog } from "./utils.js";
 
+/** Parse newline-delimited JSON transcript text into rows, skipping bad lines. */
+export function parseRows(text: string): TranscriptRow[] {
+  const rows: TranscriptRow[] = [];
+  for (const raw of text.split("\n")) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      rows.push(JSON.parse(trimmed) as TranscriptRow);
+    } catch {
+      // skip malformed lines rather than aborting the whole upload
+    }
+  }
+  return rows;
+}
+
+/** Read and parse an entire transcript file (used for subagent transcripts). */
+export async function readAllRows(file: string): Promise<TranscriptRow[]> {
+  return parseRows(await fs.readFile(file, "utf-8"));
+}
+
 /**
  * Per-transcript dedup state.
  *
@@ -104,16 +124,5 @@ export async function readNewRows(
   const complete = buffer.subarray(0, lastNewline + 1);
   const newOffset = offset + complete.length;
 
-  const rows: TranscriptRow[] = [];
-  for (const raw of complete.toString("utf-8").split("\n")) {
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-    try {
-      rows.push(JSON.parse(trimmed) as TranscriptRow);
-    } catch {
-      // skip malformed lines rather than aborting the whole upload
-    }
-  }
-
-  return { rows, offset: newOffset };
+  return { rows: parseRows(complete.toString("utf-8")), offset: newOffset };
 }

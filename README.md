@@ -8,9 +8,10 @@ Once enabled, each Claude Code turn shows up in Langfuse as a trace you can insp
 
 After each turn, a `Stop` hook reads the new part of the session transcript and uploads it to Langfuse as a [trace](https://langfuse.com/docs/observability/data-model). The structure mirrors how Claude Code actually works:
 
-- **Turn** (`Claude Code - Turn N`) — one trace per turn, from your prompt to the final answer.
+- **Turn** (`Claude Code Turn`, an agent observation) — one trace per turn, from your prompt to the final answer.
 - **Generations** — one per assistant message within the turn, with the model name, assistant text, the tool calls it requested, and token usage (including cache reads/writes).
 - **Tool calls** — `Bash`, `Read`, `Edit`, MCP tools, etc., each nested under the generation that issued it, with its input and output.
+- **Subagents** — when a turn spawns a subagent (the `Agent`/`Task` tool), the subagent's own transcript is expanded inline and nested under the spawning tool call: its generations, token usage, and tool calls all show up as children.
 - **Sessions** — all turns from one Claude Code session are grouped via the session id, so you can replay the whole session in Langfuse's [Sessions](https://langfuse.com/docs/observability/features/sessions) view.
 
 Original timestamps are preserved on every span, so the Langfuse timeline reflects real wall-clock timing.

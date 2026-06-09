@@ -46762,6 +46762,22 @@ function buildTurns(rows) {
 
 //#endregion
 //#region src/state.ts
+/** Parse newline-delimited JSON transcript text into rows, skipping bad lines. */
+function parseRows(text) {
+	const rows = [];
+	for (const raw of text.split("\n")) {
+		const trimmed = raw.trim();
+		if (!trimmed) continue;
+		try {
+			rows.push(JSON.parse(trimmed));
+		} catch {}
+	}
+	return rows;
+}
+/** Read and parse an entire transcript file (used for subagent transcripts). */
+async function readAllRows(file) {
+	return parseRows(await fs.readFile(file, "utf-8"));
+}
 const EMPTY_STATE = {
 	offset: 0,
 	turnCount: 0
@@ -46839,18 +46855,48 @@ async function readNewRows(transcriptPath, state) {
 	};
 	const complete = buffer.subarray(0, lastNewline + 1);
 	const newOffset = offset + complete.length;
-	const rows = [];
-	for (const raw of complete.toString("utf-8").split("\n")) {
-		const trimmed = raw.trim();
-		if (!trimmed) continue;
-		try {
-			rows.push(JSON.parse(trimmed));
-		} catch {}
-	}
 	return {
-		rows,
+		rows: parseRows(complete.toString("utf-8")),
 		offset: newOffset
 	};
+}
+
+//#endregion
+//#region src/subagents.ts
+/**
+* Discover subagent transcripts for a main transcript by reading the sibling
+* `subagents/*.meta.json` files. Returns an empty index if there are none (or
+* the directory is missing) — subagents are optional.
+*/
+async function discoverSubagents(transcriptPath) {
+	const index = /* @__PURE__ */ new Map();
+	const subDir = path.join(transcriptPath.replace(/\.jsonl$/i, ""), "subagents");
+	let entries;
+	try {
+		entries = await fs.readdir(subDir, { withFileTypes: true });
+	} catch (error) {
+		if (error.code !== "ENOENT") debugLog("failed to read subagents directory:", error);
+		return index;
+	}
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith(".meta.json")) continue;
+		const metaPath = path.join(subDir, entry.name);
+		try {
+			const meta$2 = JSON.parse(await fs.readFile(metaPath, "utf-8"));
+			if (typeof meta$2.toolUseId !== "string" || !meta$2.toolUseId) continue;
+			const file = path.join(subDir, entry.name.replace(/\.meta\.json$/, ".jsonl"));
+			index.set(meta$2.toolUseId, {
+				file,
+				agentType: typeof meta$2.agentType === "string" ? meta$2.agentType : "subagent",
+				description: typeof meta$2.description === "string" ? meta$2.description : void 0,
+				toolUseId: meta$2.toolUseId
+			});
+		} catch (error) {
+			debugLog(`failed to parse subagent meta ${entry.name}:`, error);
+		}
+	}
+	if (index.size > 0) debugLog(`discovered ${index.size} subagent transcript(s)`);
+	return index;
 }
 
 //#endregion
@@ -46869,10 +46915,54 @@ function buildGenerationOutput(step, clip) {
 	}));
 	return Object.keys(output).length > 1 ? output : void 0;
 }
-function emitToolCall(tc, parent, clip, fallbackEnd) {
-	startObservation(`Tool: ${tc.name}`, {
-		input: clip(tc.input),
-		output: tc.output != null ? clip(toText(tc.output)) : void 0,
+/**
+* Emit a sequence of assistant steps (one generation each, with nested tool
+* observations) under `parent`. Returns the timestamp the last step ended, so
+* the caller can close the parent observation cleanly.
+*/
+async function emitSteps(parent, steps, firstInput, startTs, ctx) {
+	let prevTs = startTs;
+	let prevToolResults;
+	for (let idx = 0; idx < steps.length; idx++) {
+		const step = steps[idx];
+		const generation = startObservation("Claude Generation", {
+			input: idx === 0 ? firstInput : prevToolResults ? {
+				role: "tool",
+				tool_results: prevToolResults
+			} : void 0,
+			output: buildGenerationOutput(step, ctx.clip),
+			model: step.model,
+			usageDetails: step.usage,
+			metadata: {
+				"claude.step_index": idx,
+				"claude.tool_count": step.toolCalls.length
+			}
+		}, {
+			asType: "generation",
+			startTime: asDate(prevTs ?? step.timestamp),
+			parentSpanContext: parent.otelSpan.spanContext()
+		});
+		const resultTimes = [];
+		for (const tc of step.toolCalls) {
+			await emitToolCall(tc, generation, step.timestamp, ctx);
+			if (tc.endTime !== void 0) resultTimes.push(tc.endTime);
+		}
+		const genEnd = resultTimes.length > 0 ? Math.max(...resultTimes) : step.timestamp ?? prevTs;
+		generation.end(asDate(genEnd));
+		prevToolResults = step.toolCalls.length > 0 ? step.toolCalls.map((tc) => ({
+			tool_use_id: tc.id,
+			tool_name: tc.name,
+			output: tc.output != null ? ctx.clip(toText(tc.output)) : void 0
+		})) : void 0;
+		if (resultTimes.length > 0) prevTs = Math.max(...resultTimes);
+		else if (step.timestamp !== void 0) prevTs = step.timestamp;
+	}
+	return prevTs;
+}
+async function emitToolCall(tc, parent, fallbackEnd, ctx) {
+	const tool = startObservation(`Tool: ${tc.name}`, {
+		input: ctx.clip(tc.input),
+		output: tc.output != null ? ctx.clip(toText(tc.output)) : void 0,
 		metadata: {
 			"claude.tool_id": tc.id,
 			"claude.tool_name": tc.name
@@ -46881,19 +46971,60 @@ function emitToolCall(tc, parent, clip, fallbackEnd) {
 		asType: "tool",
 		startTime: asDate(tc.startTime),
 		parentSpanContext: parent.otelSpan.spanContext()
-	}).end(asDate(tc.endTime ?? tc.startTime ?? fallbackEnd));
+	});
+	const subagent = ctx.subagents.get(tc.id);
+	if (subagent && !ctx.visited.has(subagent.file)) await emitSubagent(tool, subagent, tc, ctx);
+	tool.end(asDate(tc.endTime ?? tc.startTime ?? fallbackEnd));
+}
+/** Expand a subagent transcript as nested observations under its tool call. */
+async function emitSubagent(parentTool, subagent, tc, ctx) {
+	ctx.visited.add(subagent.file);
+	let rows;
+	try {
+		rows = await readAllRows(subagent.file);
+	} catch (error) {
+		debugLog(`failed to read subagent transcript ${subagent.file}:`, error);
+		return;
+	}
+	const turns = buildTurns(rows);
+	if (turns.length === 0) return;
+	for (const turn of turns) {
+		const agent = startObservation(`Subagent: ${subagent.agentType}`, {
+			input: {
+				role: "user",
+				content: ctx.clip(turn.userText)
+			},
+			output: turn.finalAssistantText != null ? {
+				role: "assistant",
+				content: ctx.clip(turn.finalAssistantText)
+			} : void 0,
+			metadata: {
+				"claude.subagent_type": subagent.agentType,
+				"claude.subagent_description": subagent.description,
+				"claude.spawning_tool_id": tc.id
+			}
+		}, {
+			asType: "agent",
+			startTime: asDate(turn.userTimestamp),
+			parentSpanContext: parentTool.otelSpan.spanContext()
+		});
+		const lastTs = await emitSteps(agent, turn.steps, {
+			role: "user",
+			content: ctx.clip(turn.userText)
+		}, turn.userTimestamp, ctx);
+		agent.end(asDate(turn.endTimestamp ?? lastTs ?? turn.userTimestamp));
+	}
 }
 /** Emit a single turn as a Langfuse observation tree. */
-function emitTurn(turn, turnNum, transcriptPath, config$1) {
-	const clip = makeClip(config$1.max_chars);
+async function emitTurn(turn, turnNum, transcriptPath, ctx) {
 	const root = startObservation("Claude Code Turn", {
 		input: {
 			role: "user",
-			content: clip(turn.userText)
+			content: ctx.clip(turn.userText)
 		},
 		output: turn.finalAssistantText != null ? {
 			role: "assistant",
-			content: clip(turn.finalAssistantText)
+			content: ctx.clip(turn.finalAssistantText)
 		} : void 0,
 		metadata: {
 			"claude.source": "claude-code",
@@ -46905,50 +47036,17 @@ function emitTurn(turn, turnNum, transcriptPath, config$1) {
 		asType: "agent",
 		startTime: asDate(turn.userTimestamp)
 	});
-	let prevTs = turn.userTimestamp;
-	let prevToolResults;
-	turn.steps.forEach((step, idx) => {
-		const generation = startObservation("Claude Generation", {
-			input: idx === 0 ? {
-				role: "user",
-				content: clip(turn.userText)
-			} : prevToolResults ? {
-				role: "tool",
-				tool_results: prevToolResults
-			} : void 0,
-			output: buildGenerationOutput(step, clip),
-			model: step.model,
-			usageDetails: step.usage,
-			metadata: {
-				"claude.step_index": idx,
-				"claude.tool_count": step.toolCalls.length
-			}
-		}, {
-			asType: "generation",
-			startTime: asDate(prevTs ?? step.timestamp),
-			parentSpanContext: root.otelSpan.spanContext()
-		});
-		const resultTimes = [];
-		for (const tc of step.toolCalls) {
-			emitToolCall(tc, generation, clip, step.timestamp);
-			if (tc.endTime !== void 0) resultTimes.push(tc.endTime);
-		}
-		const genEnd = resultTimes.length > 0 ? Math.max(...resultTimes) : step.timestamp ?? prevTs;
-		generation.end(asDate(genEnd));
-		prevToolResults = step.toolCalls.length > 0 ? step.toolCalls.map((tc) => ({
-			tool_use_id: tc.id,
-			tool_name: tc.name,
-			output: tc.output != null ? clip(toText(tc.output)) : void 0
-		})) : void 0;
-		if (resultTimes.length > 0) prevTs = Math.max(...resultTimes);
-		else if (step.timestamp !== void 0) prevTs = step.timestamp;
-	});
-	root.end(asDate(turn.endTimestamp ?? prevTs ?? turn.userTimestamp));
+	const lastTs = await emitSteps(root, turn.steps, {
+		role: "user",
+		content: ctx.clip(turn.userText)
+	}, turn.userTimestamp, ctx);
+	root.end(asDate(turn.endTimestamp ?? lastTs ?? turn.userTimestamp));
 }
 /**
 * Convert the newly appended part of a Claude Code transcript into Langfuse
 * traces. Each turn becomes its own trace, grouped into a Langfuse session via
-* the Claude Code session id. State is tracked in a sidecar so each turn is
+* the Claude Code session id. Subagent transcripts are nested under the tool
+* call that spawned them. State is tracked in a sidecar so each turn is
 * uploaded exactly once.
 */
 async function convertTranscript(transcriptPath, sessionId, config$1) {
@@ -46964,9 +47062,15 @@ async function convertTranscript(transcriptPath, sessionId, config$1) {
 	}
 	const turns = buildTurns(rows);
 	debugLog(`parsed ${turns.length} new turn(s) from ${transcriptPath}`);
+	const subagents = await discoverSubagents(transcriptPath);
 	let emitted = 0;
 	for (const turn of turns) {
 		const turnNum = state.turnCount + emitted + 1;
+		const ctx = {
+			clip: makeClip(config$1.max_chars),
+			subagents,
+			visited: /* @__PURE__ */ new Set()
+		};
 		try {
 			await propagateAttributes({
 				sessionId,
@@ -46975,7 +47079,7 @@ async function convertTranscript(transcriptPath, sessionId, config$1) {
 				...config$1.user_id ? { userId: config$1.user_id } : {},
 				...config$1.metadata ? { metadata: config$1.metadata } : {}
 			}, async () => {
-				emitTurn(turn, turnNum, transcriptPath, config$1);
+				await emitTurn(turn, turnNum, transcriptPath, ctx);
 			});
 			emitted += 1;
 		} catch (error) {
