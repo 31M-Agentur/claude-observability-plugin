@@ -31,7 +31,7 @@ Get keys from your Langfuse project settings → API Keys.
 One of:
 
 - [uv](https://docs.astral.sh/uv/) (recommended) — installs the langfuse SDK automatically, no setup needed.
-- Python 3.9+ as `python3` with `pip install "langfuse>=4.0,<5"` (fallback when uv is not on PATH).
+- Python 3.10+ as `python3` with `pip install "langfuse>=4.0,<5"` (fallback when uv is not on PATH).
 
 If neither is set up, the hook exits silently — no impact on Claude Code.
 
