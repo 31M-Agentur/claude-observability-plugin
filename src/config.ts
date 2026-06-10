@@ -25,7 +25,7 @@ export const ConfigSchema = z.object({
   base_url: z.string(),
   // LANGFUSE_TRACING_ENVIRONMENT | CC_LANGFUSE_ENVIRONMENT
   environment: z.string().optional(),
-  // CC_LANGFUSE_USER_ID
+  // LANGFUSE_USER_ID | CC_LANGFUSE_USER_ID
   user_id: z.string().optional(),
   // CC_LANGFUSE_TAGS (JSON array or comma-separated list)
   tags: z.array(z.string()).optional(),
@@ -33,6 +33,10 @@ export const ConfigSchema = z.object({
   metadata: z.record(z.string(), z.string()).optional(),
   // CC_LANGFUSE_MAX_CHARS — truncate large inputs/outputs
   max_chars: z.number().int().positive(),
+  // CC_LANGFUSE_SKILL_TAGS — tag traces with skill:<name> for invoked skills
+  skill_tags: z.boolean(),
+  // CC_LANGFUSE_CAPTURE_SKILL_CONTENT — attach injected skill instructions to tool spans
+  capture_skill_content: z.boolean(),
   // CC_LANGFUSE_DEBUG
   debug: z.boolean(),
   // CC_LANGFUSE_FAIL_ON_ERROR
@@ -43,9 +47,14 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 const PartialConfigSchema = ConfigSchema.partial();
 
-const DEFAULTS: Pick<Config, "base_url" | "max_chars" | "debug" | "fail_on_error"> = {
+const DEFAULTS: Pick<
+  Config,
+  "base_url" | "max_chars" | "skill_tags" | "capture_skill_content" | "debug" | "fail_on_error"
+> = {
   base_url: "https://us.cloud.langfuse.com",
   max_chars: 20_000,
+  skill_tags: true,
+  capture_skill_content: false,
   debug: false,
   fail_on_error: false,
 };
@@ -128,6 +137,9 @@ async function readConfigFile(file: string): Promise<Partial<Config> | undefined
         tags: raw.tags != null ? parseTags(raw.tags) : undefined,
         metadata: raw.metadata != null ? parseMetadata(raw.metadata) : undefined,
         max_chars: raw.max_chars != null ? parseInteger(raw.max_chars) : undefined,
+        skill_tags: raw.skill_tags != null ? parseBoolean(raw.skill_tags) : undefined,
+        capture_skill_content:
+          raw.capture_skill_content != null ? parseBoolean(raw.capture_skill_content) : undefined,
         debug: raw.debug != null ? parseBoolean(raw.debug) : undefined,
         fail_on_error: raw.fail_on_error != null ? parseBoolean(raw.fail_on_error) : undefined,
       }),
@@ -157,10 +169,12 @@ function readEnvConfig(env: Record<string, string | undefined>): Partial<Config>
       secret_key: getVar("SECRET_KEY", env),
       base_url: getVar("BASE_URL", env),
       environment: opt("LANGFUSE_TRACING_ENVIRONMENT", env) ?? opt("CC_LANGFUSE_ENVIRONMENT", env),
-      user_id: opt("CC_LANGFUSE_USER_ID", env),
+      user_id: getVar("USER_ID", env),
       tags: parseTags(opt("CC_LANGFUSE_TAGS", env)),
       metadata: parseMetadata(opt("CC_LANGFUSE_METADATA", env)),
       max_chars: parseInteger(opt("CC_LANGFUSE_MAX_CHARS", env)),
+      skill_tags: parseBoolean(opt("CC_LANGFUSE_SKILL_TAGS", env)),
+      capture_skill_content: parseBoolean(opt("CC_LANGFUSE_CAPTURE_SKILL_CONTENT", env)),
       debug: parseBoolean(opt("CC_LANGFUSE_DEBUG", env)),
       fail_on_error: parseBoolean(opt("CC_LANGFUSE_FAIL_ON_ERROR", env)),
     }),

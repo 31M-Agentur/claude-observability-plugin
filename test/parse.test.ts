@@ -124,3 +124,71 @@ describe("buildTurns", () => {
     expect(buildTurns(orphan)).toHaveLength(0);
   });
 });
+
+describe("buildTurns isMeta handling", () => {
+  const skillRows: TranscriptRow[] = [
+    {
+      type: "user",
+      timestamp: "2026-06-08T11:00:00.000Z",
+      message: { role: "user", content: "/my-skill do the thing" },
+      cwd: "/home/dev/project",
+      gitBranch: "feature/x",
+    },
+    {
+      type: "assistant",
+      timestamp: "2026-06-08T11:00:01.000Z",
+      message: {
+        id: "msg_s1",
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "tu_skill", name: "Skill", input: { skill: "my-skill" } },
+        ],
+      },
+    },
+    // Injected skill instructions: isMeta user row linked via sourceToolUseID.
+    {
+      type: "user",
+      isMeta: true,
+      sourceToolUseID: "tu_skill",
+      timestamp: "2026-06-08T11:00:02.000Z",
+      message: { role: "user", content: "You are running my-skill. Follow these steps..." },
+    },
+    {
+      type: "user",
+      timestamp: "2026-06-08T11:00:03.000Z",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "tu_skill", content: "Launched skill" }],
+      },
+    },
+    {
+      type: "assistant",
+      timestamp: "2026-06-08T11:00:04.000Z",
+      message: {
+        id: "msg_s2",
+        role: "assistant",
+        content: [{ type: "text", text: "Done." }],
+      },
+    },
+  ];
+
+  it("does not treat isMeta rows as turn boundaries", () => {
+    const turns = buildTurns(skillRows);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].steps).toHaveLength(2);
+    expect(turns[0].finalAssistantText).toBe("Done.");
+  });
+
+  it("captures injected instructions keyed by sourceToolUseID", () => {
+    const [turn] = buildTurns(skillRows);
+    expect(turn.injectedByToolId.get("tu_skill")).toBe(
+      "You are running my-skill. Follow these steps...",
+    );
+  });
+
+  it("captures cwd and git branch from the user row", () => {
+    const [turn] = buildTurns(skillRows);
+    expect(turn.cwd).toBe("/home/dev/project");
+    expect(turn.gitBranch).toBe("feature/x");
+  });
+});

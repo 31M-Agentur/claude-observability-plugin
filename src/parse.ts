@@ -99,6 +99,7 @@ export function buildTurns(rows: TranscriptRow[]): Turn[] {
   let assistantOrder: string[] = [];
   let assistantLatest = new Map<string, TranscriptRow>();
   let toolResultsById = new Map<string, { content: unknown; timestamp?: number }>();
+  let injectedByToolId = new Map<string, string>();
 
   const flush = () => {
     if (currentUser === null || assistantLatest.size === 0) return;
@@ -147,10 +148,36 @@ export function buildTurns(rows: TranscriptRow[]): Turn[] {
       .filter((t): t is number => t !== undefined)
       .reduce<number | undefined>((max, t) => (max === undefined || t > max ? t : max), undefined);
 
-    turns.push({ userText, userTimestamp, finalAssistantText, endTimestamp, steps });
+    turns.push({
+      userText,
+      userTimestamp,
+      finalAssistantText,
+      endTimestamp,
+      steps,
+      injectedByToolId: new Map(injectedByToolId),
+      cwd: typeof currentUser.cwd === "string" && currentUser.cwd ? currentUser.cwd : undefined,
+      gitBranch:
+        typeof currentUser.gitBranch === "string" && currentUser.gitBranch
+          ? currentUser.gitBranch
+          : undefined,
+    });
   };
 
   for (const row of rows) {
+    // Injected user rows (slash-command expansions, caveats, skill instructions)
+    // carry isMeta=true. They are not real prompts — treating them as turn starts
+    // creates phantom turns and prematurely flushes the real one.
+    if (row.isMeta) {
+      // Skill invocations link their injected instructions to the originating
+      // tool_use via sourceToolUseID; keep the text so emit can optionally
+      // attach it to that tool span.
+      if (row.sourceToolUseID) {
+        const text = extractText(getContent(row));
+        if (text) injectedByToolId.set(String(row.sourceToolUseID), text);
+      }
+      continue;
+    }
+
     if (isToolResultRow(row)) {
       const ts = parseTimestamp(row.timestamp);
       for (const tr of getToolResults(getContent(row))) {
@@ -170,6 +197,7 @@ export function buildTurns(rows: TranscriptRow[]): Turn[] {
       assistantOrder = [];
       assistantLatest = new Map();
       toolResultsById = new Map();
+      injectedByToolId = new Map();
       continue;
     }
 

@@ -89,3 +89,30 @@ describe("getConfig — Claude Code user email fallback", () => {
     expect(config.user_id).toBe("explicit-user");
   });
 });
+
+describe("getConfig ported main options", () => {
+  it("reads LANGFUSE_USER_ID with CC_LANGFUSE_USER_ID as fallback", async () => {
+    const viaPlain = await getConfig(baseOpts({ LANGFUSE_USER_ID: "user-a" }));
+    expect(viaPlain.user_id).toBe("user-a");
+    const viaCc = await getConfig(baseOpts({ CC_LANGFUSE_USER_ID: "user-b" }));
+    expect(viaCc.user_id).toBe("user-b");
+    const both = await getConfig(
+      baseOpts({ LANGFUSE_USER_ID: "user-a", CC_LANGFUSE_USER_ID: "user-b" }),
+    );
+    expect(both.user_id).toBe("user-a");
+  });
+
+  it("defaults skill_tags on and capture_skill_content off", async () => {
+    const config = await getConfig(baseOpts({}));
+    expect(config.skill_tags).toBe(true);
+    expect(config.capture_skill_content).toBe(false);
+  });
+
+  it("reads the skill option environment variables", async () => {
+    const config = await getConfig(
+      baseOpts({ CC_LANGFUSE_SKILL_TAGS: "false", CC_LANGFUSE_CAPTURE_SKILL_CONTENT: "true" }),
+    );
+    expect(config.skill_tags).toBe(false);
+    expect(config.capture_skill_content).toBe(true);
+  });
+});

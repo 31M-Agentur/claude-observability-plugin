@@ -13,6 +13,7 @@ After each turn, a `Stop` hook reads the new part of the session transcript and 
 - **Tool calls** — `Bash`, `Read`, `Edit`, MCP tools, etc., each nested under the generation that issued it, with its input and output.
 - **Subagents** — when a turn spawns a subagent (the `Agent`/`Task` tool), the subagent's own transcript is expanded inline and nested under the spawning tool call: its generations, token usage, and tool calls all show up as children.
 - **Sessions** — all turns from one Claude Code session are grouped via the session id, so you can replay the whole session in Langfuse's [Sessions](https://langfuse.com/docs/observability/features/sessions) view.
+- **Skills** — turns that invoke a skill are tagged `skill:<name>` (disable with `CC_LANGFUSE_SKILL_TAGS=false`), and the injected skill instructions can optionally be captured on the Skill tool span (`CC_LANGFUSE_CAPTURE_SKILL_CONTENT=true`).
 
 Original timestamps are preserved on every span, so the Langfuse timeline reflects real wall-clock timing.
 
@@ -34,7 +35,7 @@ claude plugin marketplace add langfuse/Claude-Observability-Plugin
 ### 2. Install the plugin
 
 ```bash
-claude plugin install langfuse@langfuse-observability
+claude plugin install langfuse-observability@langfuse-observability
 ```
 
 Restart Claude Code after installing.
@@ -67,18 +68,20 @@ Configuration is resolved as **defaults → `~/.claude/langfuse.json` → `<cwd>
 
 ### Environment variables
 
-| Variable                                                   | Required | Default                         | Description                                               |
-| ---------------------------------------------------------- | -------- | ------------------------------- | --------------------------------------------------------- |
-| `LANGFUSE_PUBLIC_KEY` / `CC_LANGFUSE_PUBLIC_KEY`           | Yes      | —                               | Langfuse public key (`pk-lf-...`)                         |
-| `LANGFUSE_SECRET_KEY` / `CC_LANGFUSE_SECRET_KEY`           | Yes      | —                               | Langfuse secret key (`sk-lf-...`)                         |
-| `LANGFUSE_BASE_URL` / `CC_LANGFUSE_BASE_URL`               | No       | `https://us.cloud.langfuse.com` | Langfuse host / data region                               |
-| `LANGFUSE_TRACING_ENVIRONMENT` / `CC_LANGFUSE_ENVIRONMENT` | No       | —                               | Environment label for the traces (e.g. `production`)      |
-| `CC_LANGFUSE_USER_ID`                                      | No       | Claude Code account email       | Attach a user id to all traces                            |
-| `CC_LANGFUSE_TAGS`                                         | No       | —                               | Extra tags for all traces (JSON array or comma-separated) |
-| `CC_LANGFUSE_METADATA`                                     | No       | —                               | JSON object of metadata to attach to all traces           |
-| `CC_LANGFUSE_MAX_CHARS`                                    | No       | `20000`                         | Truncate inputs/outputs longer than this many characters  |
-| `CC_LANGFUSE_DEBUG`                                        | No       | `false`                         | Set to `"true"` for verbose logging to stderr             |
-| `CC_LANGFUSE_FAIL_ON_ERROR`                                | No       | `false`                         | Set to `"true"` to make hook upload errors fail the hook  |
+| Variable                                                   | Required | Default                         | Description                                                |
+| ---------------------------------------------------------- | -------- | ------------------------------- | ---------------------------------------------------------- |
+| `LANGFUSE_PUBLIC_KEY` / `CC_LANGFUSE_PUBLIC_KEY`           | Yes      | —                               | Langfuse public key (`pk-lf-...`)                          |
+| `LANGFUSE_SECRET_KEY` / `CC_LANGFUSE_SECRET_KEY`           | Yes      | —                               | Langfuse secret key (`sk-lf-...`)                          |
+| `LANGFUSE_BASE_URL` / `CC_LANGFUSE_BASE_URL`               | No       | `https://us.cloud.langfuse.com` | Langfuse host / data region                                |
+| `LANGFUSE_TRACING_ENVIRONMENT` / `CC_LANGFUSE_ENVIRONMENT` | No       | —                               | Environment label for the traces (e.g. `production`)       |
+| `LANGFUSE_USER_ID` / `CC_LANGFUSE_USER_ID`                 | No       | Claude Code account email       | Attach a user id to all traces                             |
+| `CC_LANGFUSE_TAGS`                                         | No       | —                               | Extra tags for all traces (JSON array or comma-separated)  |
+| `CC_LANGFUSE_METADATA`                                     | No       | —                               | JSON object of metadata to attach to all traces            |
+| `CC_LANGFUSE_MAX_CHARS`                                    | No       | `20000`                         | Truncate inputs/outputs longer than this many characters   |
+| `CC_LANGFUSE_SKILL_TAGS`                                   | No       | `true`                          | Tag traces `skill:<name>` for every skill invoked          |
+| `CC_LANGFUSE_CAPTURE_SKILL_CONTENT`                        | No       | `false`                         | Capture injected skill instructions on the Skill tool span |
+| `CC_LANGFUSE_DEBUG`                                        | No       | `false`                         | Set to `"true"` for verbose logging to stderr              |
+| `CC_LANGFUSE_FAIL_ON_ERROR`                                | No       | `false`                         | Set to `"true"` to make hook upload errors fail the hook   |
 
 ### JSON config file
 
@@ -103,7 +106,7 @@ Instead of environment variables you can create `~/.claude/langfuse.json` (globa
 
 ## How it works
 
-A `Stop` hook runs `bun "${CLAUDE_PLUGIN_ROOT}/dist/index.mjs"` after every turn. The hook reads the session transcript **incrementally**: a small sidecar file next to the transcript (`<transcript>.jsonl.langfuse`) records the byte offset already processed and the number of turns emitted, so each turn is uploaded exactly once even though the hook fires repeatedly over the life of a session.
+A `Stop` hook runs `bun "${CLAUDE_PLUGIN_ROOT}/dist/index.mjs"` after every turn (and again on `SessionEnd`, to catch anything the final `Stop` missed). The hook reads the session transcript **incrementally**: a small sidecar file next to the transcript (`<transcript>.jsonl.langfuse`) records the byte offset already processed and the number of turns emitted, so each turn is uploaded exactly once even though the hook fires repeatedly over the life of a session.
 
 Spans are sent via the [Langfuse TypeScript SDK](https://langfuse.com/docs/sdk/typescript) on top of OpenTelemetry, batched, and flushed once at the end of the hook (capped by the hook's 30s timeout). The hook **fails open**: any error is swallowed (logged in debug mode) so a tracing problem never blocks your Claude Code session.
 

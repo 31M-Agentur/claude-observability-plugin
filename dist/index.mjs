@@ -41517,6 +41517,8 @@ var ConfigSchema = exports_external.object({
   tags: exports_external.array(exports_external.string()).optional(),
   metadata: exports_external.record(exports_external.string(), exports_external.string()).optional(),
   max_chars: exports_external.number().int().positive(),
+  skill_tags: exports_external.boolean(),
+  capture_skill_content: exports_external.boolean(),
   debug: exports_external.boolean(),
   fail_on_error: exports_external.boolean()
 });
@@ -41524,6 +41526,8 @@ var PartialConfigSchema = ConfigSchema.partial();
 var DEFAULTS = {
   base_url: "https://us.cloud.langfuse.com",
   max_chars: 20000,
+  skill_tags: true,
+  capture_skill_content: false,
   debug: false,
   fail_on_error: false
 };
@@ -41596,6 +41600,8 @@ async function readConfigFile(file2) {
       tags: raw.tags != null ? parseTags(raw.tags) : undefined,
       metadata: raw.metadata != null ? parseMetadata(raw.metadata) : undefined,
       max_chars: raw.max_chars != null ? parseInteger(raw.max_chars) : undefined,
+      skill_tags: raw.skill_tags != null ? parseBoolean(raw.skill_tags) : undefined,
+      capture_skill_content: raw.capture_skill_content != null ? parseBoolean(raw.capture_skill_content) : undefined,
       debug: raw.debug != null ? parseBoolean(raw.debug) : undefined,
       fail_on_error: raw.fail_on_error != null ? parseBoolean(raw.fail_on_error) : undefined
     }));
@@ -41615,10 +41621,12 @@ function readEnvConfig(env) {
     secret_key: getVar("SECRET_KEY", env),
     base_url: getVar("BASE_URL", env),
     environment: opt("LANGFUSE_TRACING_ENVIRONMENT", env) ?? opt("CC_LANGFUSE_ENVIRONMENT", env),
-    user_id: opt("CC_LANGFUSE_USER_ID", env),
+    user_id: getVar("USER_ID", env),
     tags: parseTags(opt("CC_LANGFUSE_TAGS", env)),
     metadata: parseMetadata(opt("CC_LANGFUSE_METADATA", env)),
     max_chars: parseInteger(opt("CC_LANGFUSE_MAX_CHARS", env)),
+    skill_tags: parseBoolean(opt("CC_LANGFUSE_SKILL_TAGS", env)),
+    capture_skill_content: parseBoolean(opt("CC_LANGFUSE_CAPTURE_SKILL_CONTENT", env)),
     debug: parseBoolean(opt("CC_LANGFUSE_DEBUG", env)),
     fail_on_error: parseBoolean(opt("CC_LANGFUSE_FAIL_ON_ERROR", env))
   }));
@@ -51775,6 +51783,7 @@ function buildTurns(rows) {
   let assistantOrder = [];
   let assistantLatest = new Map;
   let toolResultsById = new Map;
+  let injectedByToolId = new Map;
   const flush = () => {
     if (currentUser === null || assistantLatest.size === 0)
       return;
@@ -51813,9 +51822,26 @@ function buildTurns(rows) {
         candidateEnds.push(tr.timestamp);
     }
     const endTimestamp = candidateEnds.filter((t) => t !== undefined).reduce((max, t) => max === undefined || t > max ? t : max, undefined);
-    turns.push({ userText, userTimestamp, finalAssistantText, endTimestamp, steps });
+    turns.push({
+      userText,
+      userTimestamp,
+      finalAssistantText,
+      endTimestamp,
+      steps,
+      injectedByToolId: new Map(injectedByToolId),
+      cwd: typeof currentUser.cwd === "string" && currentUser.cwd ? currentUser.cwd : undefined,
+      gitBranch: typeof currentUser.gitBranch === "string" && currentUser.gitBranch ? currentUser.gitBranch : undefined
+    });
   };
   for (const row of rows) {
+    if (row.isMeta) {
+      if (row.sourceToolUseID) {
+        const text = extractText(getContent(row));
+        if (text)
+          injectedByToolId.set(String(row.sourceToolUseID), text);
+      }
+      continue;
+    }
     if (isToolResultRow(row)) {
       const ts = parseTimestamp(row.timestamp);
       for (const tr of getToolResults(getContent(row))) {
@@ -51832,6 +51858,7 @@ function buildTurns(rows) {
       assistantOrder = [];
       assistantLatest = new Map;
       toolResultsById = new Map;
+      injectedByToolId = new Map;
       continue;
     }
     if (role === "assistant") {
@@ -51971,6 +51998,21 @@ async function discoverSubagents(transcriptPath) {
 function asDate(ts) {
   return ts !== undefined ? new Date(ts) : undefined;
 }
+function collectSkillTags(turn) {
+  const tags = [];
+  for (const step of turn.steps) {
+    for (const tc of step.toolCalls) {
+      if (tc.name !== "Skill")
+        continue;
+      const input = tc.input;
+      const skill = input != null && typeof input === "object" ? input.skill : undefined;
+      if (typeof skill === "string" && skill && !tags.includes(`skill:${skill}`)) {
+        tags.push(`skill:${skill}`);
+      }
+    }
+  }
+  return tags;
+}
 function buildGenerationOutput(step, clip) {
   const output = { role: "assistant" };
   if (step.text)
@@ -52022,9 +52064,12 @@ async function emitSteps(parent, steps, firstInput, startTs, ctx) {
   return prevTs;
 }
 async function emitToolCall(tc, parent, fallbackEnd, ctx) {
+  const result = tc.output != null ? ctx.clip(toText(tc.output)) : undefined;
+  const injected = ctx.captureSkillContent ? ctx.injected.get(tc.id) : undefined;
+  const output = injected ? { result, injected_instructions: ctx.clip(injected) } : result;
   const tool = startObservation(`Tool: ${tc.name}`, {
     input: ctx.clip(tc.input),
-    output: tc.output != null ? ctx.clip(toText(tc.output)) : undefined,
+    output,
     metadata: { "claude.tool_id": tc.id, "claude.tool_name": tc.name }
   }, {
     asType: "tool",
@@ -52063,8 +52108,14 @@ async function emitSubagent(parentTool, subagent, tc, ctx) {
       startTime: asDate(turn.userTimestamp),
       parentSpanContext: parentTool.otelSpan.spanContext()
     });
-    const lastTs = await emitSteps(agent, turn.steps, { role: "user", content: ctx.clip(turn.userText) }, turn.userTimestamp, ctx);
-    agent.end(asDate(turn.endTimestamp ?? lastTs ?? turn.userTimestamp));
+    const outerInjected = ctx.injected;
+    ctx.injected = turn.injectedByToolId;
+    try {
+      const lastTs = await emitSteps(agent, turn.steps, { role: "user", content: ctx.clip(turn.userText) }, turn.userTimestamp, ctx);
+      agent.end(asDate(turn.endTimestamp ?? lastTs ?? turn.userTimestamp));
+    } finally {
+      ctx.injected = outerInjected;
+    }
   }
 }
 async function emitTurn(turn, turnNum, transcriptPath, ctx) {
@@ -52075,7 +52126,9 @@ async function emitTurn(turn, turnNum, transcriptPath, ctx) {
       "claude.source": "claude-code",
       "claude.turn_number": turnNum,
       "claude.transcript_path": transcriptPath,
-      "claude.assistant_message_count": turn.steps.length
+      "claude.assistant_message_count": turn.steps.length,
+      ...turn.cwd ? { "claude.cwd": turn.cwd } : {},
+      ...turn.gitBranch ? { "claude.git_branch": turn.gitBranch } : {}
     }
   }, {
     asType: "agent",
@@ -52098,12 +52151,22 @@ async function convertTranscript(transcriptPath, sessionId, config2) {
   let emitted = 0;
   for (const turn of turns) {
     const turnNum = state.turnCount + emitted + 1;
-    const ctx = { clip: makeClip(config2.max_chars), subagents, visited: new Set };
+    const ctx = {
+      clip: makeClip(config2.max_chars),
+      subagents,
+      visited: new Set,
+      captureSkillContent: config2.capture_skill_content,
+      injected: turn.injectedByToolId
+    };
     try {
       await propagateAttributes({
         sessionId,
         traceName: "Claude Code Turn",
-        tags: ["claude-code", ...config2.tags ?? []],
+        tags: [
+          "claude-code",
+          ...config2.skill_tags ? collectSkillTags(turn) : [],
+          ...config2.tags ?? []
+        ],
         ...config2.user_id ? { userId: config2.user_id } : {},
         ...config2.metadata ? { metadata: config2.metadata } : {}
       }, async () => {

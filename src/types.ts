@@ -42,6 +42,12 @@ export type TranscriptRow = {
   message?: TranscriptMessage;
   content?: string | ContentBlock[];
   timestamp?: string;
+  /** True for injected rows (slash-command expansions, skill instructions). */
+  isMeta?: boolean;
+  /** On isMeta rows: the tool_use id the injected content belongs to. */
+  sourceToolUseID?: string;
+  cwd?: string;
+  gitBranch?: string;
   [key: string]: unknown;
 };
 
@@ -87,4 +93,12 @@ export type Turn = {
   finalAssistantText?: string;
   endTimestamp?: number;
   steps: AssistantStep[];
+  /**
+   * Injected context (e.g. skill instructions) keyed by the tool_use id it
+   * belongs to, taken from isMeta rows carrying `sourceToolUseID`.
+   */
+  injectedByToolId: Map<string, string>;
+  /** Project dir and git branch the turn ran in, from the user row. */
+  cwd?: string;
+  gitBranch?: string;
 };

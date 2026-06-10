@@ -18,7 +18,30 @@ type EmitCtx = {
   subagents: SubagentIndex;
   /** Subagent transcript files already expanded — guards against cycles. */
   visited: Set<string>;
+  /** Attach injected skill instructions to the tool span they belong to. */
+  captureSkillContent: boolean;
+  /** Injected context for the turn currently being emitted, by tool_use id. */
+  injected: Map<string, string>;
 };
+
+/** Return `skill:<name>` tags for every Skill tool invocation in the turn. */
+export function collectSkillTags(turn: Turn): string[] {
+  const tags: string[] = [];
+  for (const step of turn.steps) {
+    for (const tc of step.toolCalls) {
+      if (tc.name !== "Skill") continue;
+      const input = tc.input;
+      const skill =
+        input != null && typeof input === "object"
+          ? (input as Record<string, unknown>).skill
+          : undefined;
+      if (typeof skill === "string" && skill && !tags.includes(`skill:${skill}`)) {
+        tags.push(`skill:${skill}`);
+      }
+    }
+  }
+  return tags;
+}
 
 function buildGenerationOutput(
   step: AssistantStep,
@@ -113,11 +136,17 @@ async function emitToolCall(
   fallbackEnd: number | undefined,
   ctx: EmitCtx,
 ): Promise<void> {
+  // Skill invocations inject their instructions as a separate transcript row;
+  // optionally surface them on the tool span they belong to.
+  const result = tc.output != null ? ctx.clip(toText(tc.output)) : undefined;
+  const injected = ctx.captureSkillContent ? ctx.injected.get(tc.id) : undefined;
+  const output = injected ? { result, injected_instructions: ctx.clip(injected) } : result;
+
   const tool = startObservation(
     `Tool: ${tc.name}`,
     {
       input: ctx.clip(tc.input),
-      output: tc.output != null ? ctx.clip(toText(tc.output)) : undefined,
+      output,
       metadata: { "claude.tool_id": tc.id, "claude.tool_name": tc.name },
     },
     {
@@ -178,15 +207,23 @@ async function emitSubagent(
       },
     );
 
-    const lastTs = await emitSteps(
-      agent,
-      turn.steps,
-      { role: "user", content: ctx.clip(turn.userText) },
-      turn.userTimestamp,
-      ctx,
-    );
+    // Tool spans inside the subagent resolve injected context against the
+    // subagent turn's own map; restore the outer turn's map afterwards.
+    const outerInjected = ctx.injected;
+    ctx.injected = turn.injectedByToolId;
+    try {
+      const lastTs = await emitSteps(
+        agent,
+        turn.steps,
+        { role: "user", content: ctx.clip(turn.userText) },
+        turn.userTimestamp,
+        ctx,
+      );
 
-    agent.end(asDate(turn.endTimestamp ?? lastTs ?? turn.userTimestamp));
+      agent.end(asDate(turn.endTimestamp ?? lastTs ?? turn.userTimestamp));
+    } finally {
+      ctx.injected = outerInjected;
+    }
   }
 }
 
@@ -210,6 +247,10 @@ async function emitTurn(
         "claude.turn_number": turnNum,
         "claude.transcript_path": transcriptPath,
         "claude.assistant_message_count": turn.steps.length,
+        // Transcript rows carry the project dir and git branch — surface them
+        // so traces from different projects/worktrees are distinguishable.
+        ...(turn.cwd ? { "claude.cwd": turn.cwd } : {}),
+        ...(turn.gitBranch ? { "claude.git_branch": turn.gitBranch } : {}),
       },
     },
     {
@@ -258,13 +299,23 @@ export async function convertTranscript(
   let emitted = 0;
   for (const turn of turns) {
     const turnNum = state.turnCount + emitted + 1;
-    const ctx: EmitCtx = { clip: makeClip(config.max_chars), subagents, visited: new Set() };
+    const ctx: EmitCtx = {
+      clip: makeClip(config.max_chars),
+      subagents,
+      visited: new Set(),
+      captureSkillContent: config.capture_skill_content,
+      injected: turn.injectedByToolId,
+    };
     try {
       await propagateAttributes(
         {
           sessionId,
           traceName: "Claude Code Turn",
-          tags: ["claude-code", ...(config.tags ?? [])],
+          tags: [
+            "claude-code",
+            ...(config.skill_tags ? collectSkillTags(turn) : []),
+            ...(config.tags ?? []),
+          ],
           ...(config.user_id ? { userId: config.user_id } : {}),
           ...(config.metadata ? { metadata: config.metadata } : {}),
         },
