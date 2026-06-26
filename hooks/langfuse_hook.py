@@ -415,12 +415,39 @@ class Turn:
     # belongs to, taken from isMeta rows carrying sourceToolUseID.
     injected_by_tool_id: Dict[str, str]
 
+def merge_assistant_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Claude Code can split one assistant message across multiple JSONL rows that
+    share message.id. Merge them back into one logical message by concatenating
+    content blocks in row order.
+    """
+    base: Dict[str, Any] = dict(rows[-1])
+    last_message = rows[-1].get("message")
+    merged_message: Dict[str, Any] = dict(last_message) if isinstance(last_message, dict) else {}
+
+    merged_content: List[Any] = []
+    for row in rows:
+        message_obj = row.get("message")
+        if not isinstance(message_obj, dict):
+            continue
+
+        content_blocks = message_obj.get("content")
+        if isinstance(content_blocks, list):
+            merged_content.extend(content_blocks)
+        elif isinstance(content_blocks, str) and content_blocks:
+            merged_content.append({"type": "text", "text": content_blocks})
+
+    merged_message["content"] = merged_content
+    base["message"] = merged_message
+    return base
+
+
 def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
     """
     Groups incremental transcript rows into turns:
     user (non-tool-result) -> assistant messages -> (tool_result rows, possibly interleaved)
     Uses:
-    - assistant message dedupe by message.id (latest row wins)
+    - assistant rows merged by message.id (all content blocks concatenated)
     - tool results dedupe by tool_use_id (latest wins)
     """
     turns: List[Turn] = []
@@ -428,18 +455,26 @@ def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
 
     # assistant messages for current turn:
     assistant_order: List[str] = []             # message ids in order of first appearance (or synthetic)
-    assistant_latest: Dict[str, Dict[str, Any]] = {}  # id -> latest msg
+    assistant_rows: Dict[str, List[Dict[str, Any]]] = {}  # id -> all rows (merged at flush)
 
     tool_results_by_id: Dict[str, Any] = {}     # tool_use_id -> content
     injected_by_tool_id: Dict[str, str] = {}    # tool_use_id -> injected text (skill instructions)
 
     def flush_turn():
-        nonlocal current_user, assistant_order, assistant_latest, tool_results_by_id, injected_by_tool_id, turns
+        nonlocal current_user, assistant_order, assistant_rows, tool_results_by_id, injected_by_tool_id, turns
         if current_user is None:
             return
-        if not assistant_latest:
+        if not assistant_rows:
             return
-        assistants = [assistant_latest[mid] for mid in assistant_order if mid in assistant_latest]
+        # Rebuild one assistant message per message.id, in the order the ids
+        # first appeared. assistant_rows[mid] holds all raw rows that shared that
+        # id; merge_assistant_rows concatenates their content blocks into one.
+        assistants: List[Dict[str, Any]] = []
+        for mid in assistant_order:
+            rows_for_id = assistant_rows.get(mid)
+            if not rows_for_id:
+                continue
+            assistants.append(merge_assistant_rows(rows_for_id))
         turns.append(Turn(
             user_msg=current_user,
             assistant_msgs=assistants,
@@ -480,7 +515,7 @@ def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
             # start a new turn
             current_user = msg
             assistant_order = []
-            assistant_latest = {}
+            assistant_rows = {}
             tool_results_by_id = {}
             injected_by_tool_id = {}
             continue
@@ -491,9 +526,10 @@ def build_turns(messages: List[Dict[str, Any]]) -> List[Turn]:
                 continue
 
             mid = get_message_id(msg) or f"noid:{len(assistant_order)}"
-            if mid not in assistant_latest:
+            if mid not in assistant_rows:
                 assistant_order.append(mid)
-            assistant_latest[mid] = msg
+                assistant_rows[mid] = []
+            assistant_rows[mid].append(msg)
             continue
 
         # ignore unknown rows
