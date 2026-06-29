@@ -339,9 +339,9 @@ def parse_timestamp(value: Any) -> Optional[datetime]:
 # ----------------- Incremental reader -----------------
 @dataclass
 class SessionState:
-    offset: int = 0
-    buffer: str = ""
-    turn_count: int = 0
+    offset: int = 0       # Last byte read from the transcript file.
+    buffer: str = ""      # Partial JSONL line kept between hook runs.
+    turn_count: int = 0   # Turns already emitted for this session.
 
 def load_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
     s = global_state.get(key, {})
