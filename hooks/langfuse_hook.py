@@ -244,11 +244,11 @@ def get_user_or_assistant_role_from_row(row: Dict[str, Any]) -> Optional[str]:
             return role
     return None
 
-def is_tool_result(msg: Dict[str, Any]) -> bool:
-    role = get_user_or_assistant_role_from_row(msg)
+def is_tool_result(row: Dict[str, Any]) -> bool:
+    role = get_user_or_assistant_role_from_row(row)
     if role != "user":
         return False
-    content = get_content_from_row(msg)
+    content = get_content_from_row(row)
     if isinstance(content, list):
         return any(isinstance(x, dict) and x.get("type") == "tool_result" for x in content)
     return False
