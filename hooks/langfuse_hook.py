@@ -756,8 +756,23 @@ def parse_subagent_generations(path: Path) -> List[Dict[str, Any]]:
     return merged
 
 
+def resolve_agent_type(tool_meta: Dict[str, Any], tool_input: Any) -> str:
+    """Resolve a Task/Agent subagent's type name.
+
+    Synchronous agents carry ``agentType`` in the ``toolUseResult``; async /
+    background agents omit it, but the tool_use ``input.subagent_type`` is present
+    in both cases. Fall back to a generic label when neither is available.
+    """
+    if isinstance(tool_meta, dict) and tool_meta.get("agentType"):
+        return tool_meta["agentType"]
+    if isinstance(tool_input, dict) and tool_input.get("subagent_type"):
+        return tool_input["subagent_type"]
+    return "subagent"
+
+
 def emit_subagent_generations(langfuse: Langfuse, parent_otel_span: Any, tool_meta: Dict[str, Any],
-                              transcript_path: Path, fallback_ts: Optional[datetime]) -> None:
+                              transcript_path: Path, fallback_ts: Optional[datetime],
+                              tool_input: Any = None) -> None:
     """Emit a Task/Agent subagent's assistant messages as generations nested under its tool span.
 
     Surfaces the subagent's real model (often a cheaper tier) and token usage so
@@ -772,7 +787,7 @@ def emit_subagent_generations(langfuse: Langfuse, parent_otel_span: Any, tool_me
         debug(f"no subagent generations for agent {agent_id} at {sub_path}")
         return
 
-    agent_type = tool_meta.get("agentType") or "subagent"
+    agent_type = resolve_agent_type(tool_meta, tool_input)
     prev_ts: Optional[datetime] = None
     for idx, am in enumerate(sub_msgs):
         am_ts = parse_timestamp(am) or prev_ts or fallback_ts
@@ -988,7 +1003,7 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
                     if isinstance(tool_meta, dict):
                         emit_subagent_generations(
                             langfuse, tool_span._otel_span, tool_meta, transcript_path,
-                            fallback_ts=tr_ts or am_ts,
+                            fallback_ts=tr_ts or am_ts, tool_input=tinput_raw,
                         )
 
                 tool_span.end(end_time=_to_ns(tr_ts or am_ts))
