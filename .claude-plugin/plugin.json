@@ -1,7 +1,7 @@
 {
   "name": "langfuse-observability",
   "description": "The Langfuse x Claude Code Observability Plugin (31M fork: subagent tracing, repo tags)",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": {
     "name": "Langfuse"
   },
