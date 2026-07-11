@@ -2,7 +2,10 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "langfuse>=4.0,<5",
+#   # Pinned: the hook uses SDK 4.x internals (langfuse._otel_tracer,
+#   # _create_observation_from_otel_span). `uv run --script` re-resolves on every
+#   # run, so an unpinned range can silently pull a release that breaks emit.
+#   "langfuse==4.14.0",
 # ]
 # ///
 """
@@ -91,6 +94,34 @@ def info(msg: str) -> None:
             lg.info(msg)
         except Exception:
             pass
+
+def error(msg: str) -> None:
+    lg = _get_logger()
+    if lg is not None:
+        try:
+            lg.error(msg)
+        except Exception:
+            pass
+
+def _bridge_sdk_logging() -> None:
+    """Route Langfuse/OpenTelemetry warnings into our log file.
+
+    The batch span exporter reports delivery failures (e.g. a 401 on rotated
+    keys) by logging "Failed to export ... code: 401" rather than raising, so
+    ``flush()`` swallows them and the hook still reports "Processed N turns".
+    Attaching our file handler to those loggers makes a silently-dropped batch
+    visible in ``langfuse_hook.log`` without needing CC_LANGFUSE_DEBUG. Idempotent.
+    """
+    lg = _get_logger()
+    if lg is None or not lg.handlers:
+        return
+    handler = lg.handlers[0]
+    for name in ("langfuse", "opentelemetry"):
+        ext = logging.getLogger(name)
+        if ext.level == logging.NOTSET or ext.level > logging.WARNING:
+            ext.setLevel(logging.WARNING)
+        if handler not in ext.handlers:
+            ext.addHandler(handler)
 
 # ----------------- State locking (best-effort) -----------------
 class FileLock:
@@ -607,6 +638,52 @@ def collect_skill_tags(turn: Turn) -> List[str]:
     return names
 
 
+_repo_tag_cache: Dict[str, Optional[str]] = {}
+
+def repo_tag_for_cwd(cwd: Optional[str]) -> Optional[str]:
+    """Return a ``repo:<name>`` tag identifying the repository for ``cwd``.
+
+    Prefers the ``origin`` remote's repo name so that git worktrees (e.g. one
+    per Conductor workspace) all tag as the same underlying repo instead of the
+    per-worktree directory name. Falls back to the git toplevel basename, then
+    the cwd basename. Fail-open: any error yields no tag. Cached per cwd since a
+    single hook run may emit several turns from the same directory.
+    """
+    if not cwd:
+        return None
+    if cwd in _repo_tag_cache:
+        return _repo_tag_cache[cwd]
+
+    name: Optional[str] = None
+    try:
+        import subprocess
+
+        def _git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-C", cwd, *args],
+                capture_output=True, text=True, timeout=1.5,
+            ).stdout.strip()
+
+        url = _git("config", "--get", "remote.origin.url")
+        if url:
+            base = url.rstrip("/").split("/")[-1]
+            if base.endswith(".git"):
+                base = base[:-4]
+            name = base or None
+        if not name:
+            top = _git("rev-parse", "--show-toplevel")
+            if top:
+                name = os.path.basename(top) or None
+    except Exception:
+        name = None
+    if not name:
+        name = os.path.basename(cwd.rstrip("/")) or None
+
+    tag = f"repo:{name}" if name else None
+    _repo_tag_cache[cwd] = tag
+    return tag
+
+
 def short_session_label(session_id: str, max_len: int = 12) -> str:
     """Return a compact session label for trace names."""
     sid = session_id.strip()
@@ -762,6 +839,9 @@ def emit_turn(langfuse: Langfuse, session_id: str, turn_num: int, turn: Turn, tr
             trace_metadata[dst_key] = v
 
     tags = ["claude-code"]
+    repo_tag = repo_tag_for_cwd(turn.user_msg.get("cwd"))
+    if repo_tag:
+        tags.append(repo_tag)
     if SKILL_TAGS:
         tags += collect_skill_tags(turn)
 
@@ -963,6 +1043,7 @@ def main() -> int:
 
     langfuse = None
     try:
+        _bridge_sdk_logging()
         langfuse = Langfuse(public_key=public_key, secret_key=secret_key, host=host)
     except Exception:
         return 0
